@@ -15,8 +15,8 @@ class PromptDA(nn.Module):
     output_act = 'sigmoid'
 
     def __init__(self,
-                 encoder='vitl',
-                 ckpt_path='checkpoints/promptda_vitl.ckpt'):
+                 encoder='vits',
+                 ckpt_path=None):
         super().__init__()
         model_config = model_configs[encoder]
 
@@ -43,8 +43,8 @@ class PromptDA(nn.Module):
             [0.485, 0.456, 0.406]).view(1, 3, 1, 1))
         self.register_buffer('_std', torch.tensor(
             [0.229, 0.224, 0.225]).view(1, 3, 1, 1))
-
-        self.load_checkpoint(ckpt_path)
+        if ckpt_path is not None:
+            self.load_checkpoint(ckpt_path)
     
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path = None, model_kwargs = None, **hf_kwargs):
@@ -76,6 +76,16 @@ class PromptDA(nn.Module):
         model_kwargs.update({'ckpt_path': ckpt_path})
         model = cls(**model_kwargs)
         return model
+
+    def from_depth_anything(self, pretrained='checkpoints/depth_anything_v2_metric_hypersim_vits.pth'):
+        if os.path.exists(pretrained):
+            Log.info(f'Loading checkpoint from {pretrained}')
+            checkpoint = torch.load(pretrained, map_location='cpu')
+            self.load_state_dict({k: v for k, v in checkpoint.items()}, strict=False)
+        else:
+            Log.warn(f'Checkpoint {pretrained} not found')
+        return self
+
 
     def load_checkpoint(self, ckpt_path):
         if os.path.exists(ckpt_path):

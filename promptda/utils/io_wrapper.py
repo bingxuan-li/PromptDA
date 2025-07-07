@@ -83,19 +83,22 @@ def save_depth(depth,
 
     if not save_vis:
         return
+    
     output_path_ = output_path
-    output_path = output_path_.replace('.png', '_depth.jpg')
-    depth_vis, depth_min, depth_max = visualize_depth(depth, ret_minmax=True)
-    imageio.imwrite(output_path, depth_vis)
-
-
     if prompt_depth is not None:
         prompt_depth = to_numpy_func(prompt_depth)
         output_path = output_path_.replace('.png', '_prompt_depth.jpg')
-        prompt_depth_vis = visualize_depth(prompt_depth,
-                                           depth_min=depth_min,
-                                           depth_max=depth_max)
+        prompt_depth_vis, depth_min, depth_max = visualize_depth(prompt_depth, ret_minmax=True)
         imageio.imwrite(output_path, prompt_depth_vis)
+
+    output_path = output_path_.replace('.png', '_depth.jpg')
+    if prompt_depth is not None:
+        depth_vis = visualize_depth(depth,
+                                    depth_min=depth_min,
+                                    depth_max=depth_max)
+    else:        
+        depth_vis, depth_min, depth_max = visualize_depth(depth, ret_minmax=True)
+    imageio.imwrite(output_path, depth_vis)
 
     if image is not None:
         output_path = output_path_.replace('.png', '_image.jpg')

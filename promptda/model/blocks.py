@@ -229,7 +229,16 @@ class FeatureFusionDepthBlock(nn.Module):
     """Feature fusion block.
     """
 
-    def __init__(self, features, activation, deconv=False, bn=False, expand=False, align_corners=True, size=None):
+    def __init__(
+        self, 
+        features, 
+        activation, 
+        deconv=False, 
+        bn=False, 
+        expand=False, 
+        align_corners=True, 
+        size=None
+    ):
         """Init.
 
         Args:
