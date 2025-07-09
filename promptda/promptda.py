@@ -98,14 +98,14 @@ class PromptDA(nn.Module):
 
     def forward(self, x, prompt_depth=None):
         assert prompt_depth is not None, 'prompt_depth is required'
-        prompt_depth, min_val, max_val = self.normalize(prompt_depth)
+        # prompt_depth, min_val, max_val = self.normalize(prompt_depth)
         h, w = x.shape[-2:]
         features = self.pretrained.get_intermediate_layers(
             (x - self._mean) / self._std, self.model_config['layer_idxs'],
             return_class_token=True)
         patch_h, patch_w = h // self.patch_size, w // self.patch_size
         depth = self.depth_head(features, patch_h, patch_w, prompt_depth)
-        depth = self.denormalize(depth, min_val, max_val)
+        # depth = self.denormalize(depth, min_val, max_val)
         return depth
 
     @torch.no_grad()

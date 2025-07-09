@@ -3,7 +3,7 @@ import imageio
 import torch
 import os
 import matplotlib.pyplot as plt
-import cv2
+import cv2, h5py
 
 from promptda.utils.logger import Log
 from promptda.utils.depth_utils import visualize_depth
@@ -59,6 +59,10 @@ def load_depth(depth_path, to_tensor=True):
         depth = depth / 1000.
     elif depth_path.endswith('.npz'):
         depth = np.load(depth_path)['depth']
+    elif depth_path.endswith('.hdf5'):
+        with h5py.File(depth_path, 'r') as f:
+            depth = f['depth'][()]
+        depth = depth.astype(np.float32)
     else:
         raise ValueError(f"Unsupported depth format: {depth_path}")
     if to_tensor:

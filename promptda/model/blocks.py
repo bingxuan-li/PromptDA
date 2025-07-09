@@ -6,10 +6,12 @@ import os
 import numpy as np
 
 
-def _make_fusion_block(features, use_bn, size=None):
+def _make_fusion_block(in_features, features, use_bn, first_layer=False, size=None):
     return FeatureFusionDepthBlock(
+        in_features,
         features,
         nn.ReLU(False),
+        first_layer=first_layer,
         deconv=False,
         bn=use_bn,
         expand=False,
@@ -230,12 +232,14 @@ class FeatureFusionDepthBlock(nn.Module):
     """
 
     def __init__(
-        self, 
-        features, 
-        activation, 
-        deconv=False, 
-        bn=False, 
-        expand=False, 
+        self,
+        in_features,
+        features,
+        activation,
+        first_layer=False,
+        deconv=False,
+        bn=False,
+        expand=False,
         align_corners=True, 
         size=None
     ):
@@ -250,7 +254,8 @@ class FeatureFusionDepthBlock(nn.Module):
         self.align_corners = align_corners
 
         self.groups = 1
-
+        self.in_features = in_features
+        self.first_layer = first_layer
         self.expand = expand
         out_features = features
         if self.expand == True:
@@ -258,11 +263,15 @@ class FeatureFusionDepthBlock(nn.Module):
 
         self.out_conv = nn.Conv2d(
             features, out_features, kernel_size=1, stride=1, padding=0, bias=True, groups=1)
-
+        if first_layer:
+            self.in_conv = nn.Conv2d(
+                in_features, features, kernel_size=3, stride=1,
+                padding=1, bias=True, groups=1)
         self.resConfUnit1 = ResidualConvUnit(features, activation, bn)
         self.resConfUnit2 = ResidualConvUnit(features, activation, bn)
+
         self.resConfUnit_depth = nn.Sequential(
-            nn.Conv2d(1, features, kernel_size=3, stride=1,
+            nn.Conv2d(self.in_features, features, kernel_size=3, stride=1,
                       padding=1, bias=True, groups=1),
             activation,
             nn.Conv2d(features, features, kernel_size=3,
@@ -288,11 +297,14 @@ class FeatureFusionDepthBlock(nn.Module):
             res = self.resConfUnit1(xs[1])
             output = self.skip_add.add(output, res)
 
+        if self.first_layer:
+            output = self.in_conv(output)
         output = self.resConfUnit2(output)
 
         if prompt_depth is not None:
-            prompt_depth = F.interpolate(
-                prompt_depth, output.shape[2:], mode='bilinear', align_corners=False)
+            if prompt_depth.shape[-2:] != output.shape[-2:]:
+                prompt_depth = F.interpolate(
+                    prompt_depth, output.shape[-2:], mode='bilinear', align_corners=False)
             res = self.resConfUnit_depth(prompt_depth)
             output = self.skip_add.add(output, res)
 

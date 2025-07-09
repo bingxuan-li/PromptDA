@@ -69,14 +69,17 @@ class DPTHead(nn.Module):
 
         self.scratch.stem_transpose = None
 
+        self.scratch.depth_extractor = _make_fusion_block(
+            2, features, use_bn, first_layer=True)
+
         self.scratch.refinenet1 = _make_fusion_block(
-            features, use_bn)
+            features, features, use_bn)
         self.scratch.refinenet2 = _make_fusion_block(
-            features, use_bn)
+            features, features, use_bn)
         self.scratch.refinenet3 = _make_fusion_block(
-            features, use_bn)
+            features, features, use_bn)
         self.scratch.refinenet4 = _make_fusion_block(
-            features, use_bn)
+            features, features, use_bn)
 
         head_features_1 = features
         head_features_2 = 32
@@ -104,7 +107,7 @@ class DPTHead(nn.Module):
                 act_func,
             )
 
-    def forward(self, out_features, patch_h, patch_w, prompt_depth=None):
+    def forward(self, out_features, patch_h, patch_w, prompt=None):
         out = []
         for i, x in enumerate(out_features):
             if self.use_clstoken:
@@ -129,14 +132,17 @@ class DPTHead(nn.Module):
         layer_3_rn = self.scratch.layer3_rn(layer_3)
         layer_4_rn = self.scratch.layer4_rn(layer_4)
 
+        path_0 = self.scratch.depth_extractor(
+            prompt, size=prompt.shape[-2:], prompt_depth=prompt)
+
         path_4 = self.scratch.refinenet4(
-            layer_4_rn, size=layer_3_rn.shape[2:], prompt_depth=prompt_depth)
+            layer_4_rn, size=layer_3_rn.shape[2:], prompt_depth=path_0)
         path_3 = self.scratch.refinenet3(
-            path_4, layer_3_rn, size=layer_2_rn.shape[2:], prompt_depth=prompt_depth)
+            path_4, layer_3_rn, size=layer_2_rn.shape[2:], prompt_depth=path_0)
         path_2 = self.scratch.refinenet2(
-            path_3, layer_2_rn, size=layer_1_rn.shape[2:], prompt_depth=prompt_depth)
+            path_3, layer_2_rn, size=layer_1_rn.shape[2:], prompt_depth=path_0)
         path_1 = self.scratch.refinenet1(
-            path_2, layer_1_rn, prompt_depth=prompt_depth)
+            path_2, layer_1_rn, prompt_depth=path_0)
         out = self.scratch.output_conv1(path_1)
         out_feat = F.interpolate(
             out, (int(patch_h * 14), int(patch_w * 14)),
