@@ -1,6 +1,9 @@
 # delete files larger than 10MiB
 **basicModel_neutral_lbs_10_207_0_v1.0.0.pkl 
 
+# Ignore the wandb directory
+wandb/
+
 .vscode
 .hydra
 *.txt

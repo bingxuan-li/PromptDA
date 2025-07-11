@@ -64,32 +64,40 @@ def gradient_loss(pred, target):
     target_dy = torch.abs(target[:, :, :-1, :] - target[:, :, 1:, :])
     return torch.mean(torch.abs(pred_dx - target_dx)) + torch.mean(torch.abs(pred_dy - target_dy))
 
-def train():
+def compute_metrics(pred, target):
+    mask = target > 1e-5  # ignore invalid depth (e.g., zero or negative)
+    abs_diff = torch.abs(pred - target)[mask]
+    mae = abs_diff.mean()
+    abs_rel = (abs_diff / target[mask]).mean()
+    return {
+        'mae': mae.item(),
+        'abs_rel': abs_rel.item()
+    }
+
+def train(args):
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    BATCH_SIZE = 2
     LR_VIT_WARMUP = 5e-6
     LR_VIT = 5e-6
     LR_OTHER = 5e-5
-    WARMUP_STEPS = 10000
-    TRAIN_STEPS = 210000
-    VALIDATE_EVERY = 500
 
     train_txt = '/vast/bl3912/hypersim-random-10k/train.txt'
     val_txt = '/vast/bl3912/hypersim-random-10k/val.txt'
 
     train_set = HypersimDepthDataset(train_txt)
     val_set = HypersimDepthDataset(val_txt)
-    train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=BATCH_SIZE, shuffle=False)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False)
     train_iter = iter(train_loader)
 
-    model = PromptDA(encoder='vitb')
-    model = model.from_depth_anything("checkpoints/depth_anything_v2_metric_hypersim_vitb.pth")
-    model = torch.nn.DataParallel(model).to(DEVICE)
+    model = PromptDA(encoder=args.backbone)
+    model = torch.nn.DataParallel(model)
+    pretrained = torch.load(f"checkpoints/depth_anything_v2_metric_hypersim_{args.backbone}.pth")
+    model.module.load_state_dict(pretrained, strict=False)
+    model = model.to(DEVICE).train()
 
     vit_params = []
     other_params = []
-    for name, param in model.named_parameters():
+    for name, param in model.module.named_parameters():
         (vit_params if "pretrained" in name else other_params).append(param)
     for param in other_params:
         param.requires_grad = False
@@ -101,10 +109,11 @@ def train():
     # No scheduling is used according to authors' reply
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1000000, gamma=0.5)
 
-    wandb.init(project="PromptDA-Training", name="finetune-hypersim")
+    wandb.init(project="PromptDA-Training", name=args.exp_name+'-'+args.backbone)
 
     step = 0
-    while step < TRAIN_STEPS:
+    total_steps = args.train_steps + args.warm_up_steps
+    while step < total_steps:
         step_start_time = time.time()
         try:
             data_start = time.time()
@@ -120,8 +129,9 @@ def train():
         prompt_depth = prompt_depth.to(DEVICE)
         target_depth = target_depth.to(DEVICE)
 
-        if step == WARMUP_STEPS:
-            for param in model.parameters():
+        if step == args.warm_up_steps:
+            Log.info(f"Warm-up completed at step {step}. Switching to full training mode.")
+            for param in model.module.parameters():
                 param.requires_grad = True
             optimizer = optim.AdamW([
                 {'params': vit_params,   'lr': LR_VIT},
@@ -149,19 +159,21 @@ def train():
         scheduler.step()
 
         gpu_stats = log_all_gpu_stats()
-        wandb.log({
-            "train/loss": loss.item(),
-            "train/loss_l1": loss_l1.item(),
-            "train/loss_grad": loss_grad.item(),
-            "lr": scheduler.get_last_lr()[0],
-            "timing/data_time_sec": data_time,
-            "timing/fwd_time_sec": fwd_time,
-            "timing/bwd_time_sec": bwd_time,
-            "timing/total_step_time_sec": time.time() - step_start_time,
-            **gpu_stats
-        }, step=step)
+        
+        if step % 10 == 0 or step == 1:
+            wandb.log({
+                "train/loss": loss.item(),
+                "train/loss_l1": loss_l1.item(),
+                "train/loss_grad": loss_grad.item(),
+                "lr": scheduler.get_last_lr()[0],
+                "timing/data_time_sec": data_time,
+                "timing/fwd_time_sec": fwd_time,
+                "timing/bwd_time_sec": bwd_time,
+                "timing/total_step_time_sec": time.time() - step_start_time,
+                **gpu_stats
+            }, step=step)
 
-        if step % 50 == 0 or step == 1:
+        if step % 100 == 0 or step == 1:
             Log.info(f"[Step {step}] "
                      f"Loss: {loss.item():.4f} | "
                      f"L1: {loss_l1.item():.4f} | "
@@ -170,26 +182,63 @@ def train():
                      f"FWD: {fwd_time:.3f}s | BWD: {bwd_time:.3f}s | "
                      f"Total: {time.time() - step_start_time:.3f}s")
 
-        if step % VALIDATE_EVERY == 0:
+        if step % args.validate_every == 0:
             model.eval()
-            val_loss = 0.0
+            metrics_dict = {'l1': 0.0, 'grad': 0.0, 'mae': 0.0, 'abs_rel': 0.0}
             with torch.no_grad():
                 for val_rgb, val_prompt, val_target in val_loader:
                     val_rgb = val_rgb.to(DEVICE)
                     val_prompt = val_prompt.to(DEVICE)
                     val_target = val_target.to(DEVICE)
-                    val_pred = model.module.predict(val_rgb, val_prompt)
+                    val_pred = model.forward(val_rgb, val_prompt)
                     l1 = nn.functional.l1_loss(val_pred, val_target)
                     grad = gradient_loss(val_pred, val_target)
-                    val_loss += l1 + 0.5 * grad
-            val_loss /= len(val_loader)
-            wandb.log({"val/loss": val_loss.item()}, step=step)
-            Log.info(f"[Step {step}] Validation Loss = {val_loss.item():.4f}")
+                    metrics = compute_metrics(val_pred, val_target)
+                    metrics_dict['l1'] += l1.item()
+                    metrics_dict['grad'] += grad.item()
+                    metrics_dict['mae'] += metrics['mae']
+                    metrics_dict['abs_rel'] += metrics['abs_rel']
 
-        if step % 10000 == 0:
-            os.makedirs("checkpoints/test_train_0709", exist_ok=True)
-            torch.save(model.state_dict(), f"checkpoints/test_train_0709/promptda_step{step}.pth")
+                metrics_dict = {k: v / len(val_loader) for k, v in metrics_dict.items()}
+                wandb.log({
+                    "val/loss": metrics_dict['l1'] + 0.5 * metrics_dict['grad'],
+                    "val/l1": metrics_dict['l1'],
+                    "val/grad": metrics_dict['grad'],
+                    "val/mae": metrics_dict['mae'],
+                    "val/abs_rel": metrics_dict['abs_rel']
+                }, step=step)
+                Log.info(f"[Validation Step {step}] "
+                         f"Loss: {metrics_dict['l1']:.4f} | "
+                         f"Grad: {metrics_dict['grad']:.4f} | "
+                         f"MAE: {metrics_dict['mae']:.4f} | "
+                         f"Abs Rel: {metrics_dict['abs_rel']:.4f}")
+
+        if step % args.save_step == 0:
+            ckpt_dir = f"checkpoints/{args.exp_name}-{args.backbone}"
+            os.makedirs(ckpt_dir, exist_ok=True)
+            ckpt_path = os.path.join(ckpt_dir, f"step_{step}.pth")
+            torch.save({
+                'step': step,
+                'model_state_dict': model.module.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'args': vars(args),  # optional: saves hyperparams too
+            }, ckpt_path)
+
 
 
 if __name__ == "__main__":
-    train()
+
+    import argparse
+    parser = argparse.ArgumentParser(description="Train PromptDA on HyperSim")
+    parser.add_argument("--backbone", type=str, default="vitb", help="Backbone architecture")
+    parser.add_argument("--exp-name", type=str, default="default", help="Experiment name")
+    parser.add_argument("--save-step", type=int, default=10000, help="Save model every N steps")
+    parser.add_argument("--warm-up-steps", type=int, default=10000, help="Warm-up steps")
+    parser.add_argument("--train-steps", type=int, default=200000, help="Total training steps")
+    parser.add_argument("--validate-every", type=int, default=500, help="Validation frequency")
+    parser.add_argument("--batch-size", type=int, default=2, help="Batch size for training")
+
+    args = parser.parse_args()
+
+    train(args)

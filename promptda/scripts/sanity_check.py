@@ -10,4 +10,4 @@ prompt_depth = load_depth(prompt_depth_path).to(DEVICE) # 192x256, ARKit LiDAR d
 model = PromptDA.from_pretrained("depth-anything/prompt-depth-anything-vitl").to(DEVICE).eval()
 depth = model.predict(image, prompt_depth) # HxW, depth in meters
 
-save_depth(depth, prompt_depth=prompt_depth, image=image)
+save_depth(depth, gt_depth=prompt_depth, image=image)

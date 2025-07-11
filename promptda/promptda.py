@@ -12,7 +12,8 @@ class PromptDA(nn.Module):
     patch_size = 14  # patch size of the pretrained dinov2 model
     use_bn = False
     use_clstoken = False
-    output_act = 'sigmoid'
+    # output_act = 'sigmoid'
+    output_act = 'identity'
 
     def __init__(self,
                  encoder='vits',
@@ -91,8 +92,11 @@ class PromptDA(nn.Module):
         if os.path.exists(ckpt_path):
             Log.info(f'Loading checkpoint from {ckpt_path}')
             checkpoint = torch.load(ckpt_path, map_location='cpu')
-            self.load_state_dict(
-                {k[9:]: v for k, v in checkpoint['state_dict'].items()})
+            if 'state_dict' in checkpoint:
+                self.load_state_dict(
+                    {k[9:]: v for k, v in checkpoint['state_dict'].items()})
+            else:
+                self.load_state_dict(checkpoint, strict=False)
         else:
             Log.warn(f'Checkpoint {ckpt_path} not found')
 
