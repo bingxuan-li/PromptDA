@@ -12,17 +12,18 @@ class PromptDA(nn.Module):
     patch_size = 14  # patch size of the pretrained dinov2 model
     use_bn = False
     use_clstoken = False
-    # output_act = 'sigmoid'
-    output_act = 'identity'
 
     def __init__(self,
                  encoder='vits',
-                 ckpt_path=None):
+                 ckpt_path=None,
+                 output_act='identity'
+                 ):
         super().__init__()
         model_config = model_configs[encoder]
 
         self.encoder = encoder
         self.model_config = model_config
+        self.output_act = output_act
         module_path = Path(__file__) # From anywhere else: module_path = Path(inspect.getfile(PromptDA))
         package_base_dir = str(Path(*module_path.parts[:-2])) # extract path to PromptDA module, then resolve to repo base dir for dinov2 load
         self.pretrained = torch.hub.load(

@@ -5,6 +5,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from promptda.model.blocks import _make_scratch, _make_fusion_block
 
+class InverseShift(nn.Module):
+    def __init__(self, epsilon=0.1):
+        super().__init__()
+        self.epsilon = epsilon
+
+    def forward(self, x):
+        return 1.0 / (x + self.epsilon)
 
 class DPTHead(nn.Module):
     def __init__(self,
@@ -84,7 +91,12 @@ class DPTHead(nn.Module):
         head_features_1 = features
         head_features_2 = 32
 
-        act_func = nn.Sigmoid() if output_act == 'sigmoid' else nn.Identity()
+        if output_act == 'sigmoid':
+            act_func = nn.Sigmoid()
+        elif output_act == 'inverse':
+            act_func = InverseShift()
+        else:
+            act_func = nn.Identity()
 
         if nclass > 1:
             self.scratch.output_conv = nn.Sequential(

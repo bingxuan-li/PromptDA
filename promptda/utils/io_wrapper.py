@@ -51,21 +51,51 @@ def load_image(image_path, to_tensor=True, max_size=1008, multiple_of=14):
     return image
 
 
+def read_pfm(file):
+    with open(file, 'rb') as f:
+        header = f.readline().rstrip()
+        color = header == b'PF'
+        if not color and header != b'Pf':
+            raise Exception('Not a PFM file.')
+
+        dim_line = f.readline().decode('utf-8')
+        while dim_line.startswith('#'):  # skip comments
+            dim_line = f.readline().decode('utf-8')
+        width, height = map(int, re.findall(r'\d+', dim_line))
+
+        scale = float(f.readline().rstrip())
+        endian = '<' if scale < 0 else '>'
+        data = np.fromfile(f, endian + 'f')
+        shape = (height, width, 3) if color else (height, width)
+        return np.flipud(np.reshape(data, shape))
+
 def load_depth(depth_path, to_tensor=True):
     '''
     Load depth from path and convert to tensor
     '''
-    if depth_path.endswith('.png'):
-        depth = np.asarray(imageio.imread(depth_path)).astype(np.float32)
-        depth = depth / 1000.
+    if depth_path.endswith('.png') or depth_path.endswith('.jpg'):
+        # depth = np.asarray(imageio.imread(depth_path)).astype(np.float32)
+        # depth = depth / 1000.
+        depth = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32)
+        if depth.ndim == 3 and depth.shape[2] == 3:
+            depth = np.mean(depth, axis=2)
+        depth = depth / 255.0  # Normalize to [0, 1]
     elif depth_path.endswith('.npz'):
         depth = np.load(depth_path)['depth']
+    elif depth_path.endswith('.npy'):
+        depth = np.load(depth_path)
     elif depth_path.endswith('.hdf5'):
         with h5py.File(depth_path, 'r') as f:
             depth = f['depth'][()]
         depth = depth.astype(np.float32)
+    elif depth_path.endswith('.pfm'):
+        depth = read_pfm(depth_path)
+        if depth.ndim == 3 and depth.shape[2] == 3:
+            depth = np.mean(depth, axis=2)
+        depth = depth.astype(np.float32)
     else:
         raise ValueError(f"Unsupported depth format: {depth_path}")
+    depth = depth.astype(np.float32)
     if to_tensor:
         return to_tensor_func(depth)
     return depth
@@ -128,10 +158,13 @@ def save_depth(depth,
                image=None,
                output_path='results',
                name='',
-               in_one_plot=False):
+               in_one_plot=False,
+               min_depth=None,
+               max_depth=None,):
 
     os.makedirs(output_path, exist_ok=True)
-    depth = to_numpy_func(depth)
+    if isinstance(depth, torch.Tensor):
+        depth = to_numpy_func(depth)
     vis_depth = visualize_depth(depth)
     depth_path = os.path.join(output_path, f'{name}_depth.jpg')
     cv2.imwrite(depth_path, cv2.cvtColor(vis_depth, cv2.COLOR_RGB2BGR))
@@ -139,7 +172,8 @@ def save_depth(depth,
     
     # Save RGB image
     if image is not None:
-        image = to_numpy_func(image)
+        if isinstance(image, torch.Tensor):
+            image = to_numpy_func(image)
         img_path = os.path.join(output_path, f'{name}_image.jpg')
         img_uint8 = np.clip(image * 255.0, 0, 255).astype(np.uint8)
         cv2.imwrite(img_path, cv2.cvtColor(img_uint8, cv2.COLOR_RGB2BGR))
@@ -147,21 +181,29 @@ def save_depth(depth,
 
     # Save gt_depth visualization
     if gt_depth is not None:
-        gt_depth = to_numpy_func(gt_depth)
+        if isinstance(gt_depth, torch.Tensor):
+            gt_depth = to_numpy_func(gt_depth)
         gt_depth_path = os.path.join(output_path, f'{name}_gt_depth.jpg')
-        vis_gt, depth_min, depth_max = visualize_depth(gt_depth, ret_minmax=True)
+        vis_gt = visualize_depth(gt_depth)
         cv2.imwrite(gt_depth_path, cv2.cvtColor(vis_gt, cv2.COLOR_RGB2BGR))
         Log.info(f"Saved ground truth depth to {gt_depth_path}", tag="save_depth")
 
-    if in_one_plot and gt_depth is not None and image is not None:
+    if in_one_plot:
+        if min_depth is None:
+            min_depth = np.min(gt_depth)
+        if max_depth is None:
+            max_depth = np.max(gt_depth)
+        vis_depth = visualize_depth(depth, depth_min=min_depth, depth_max=max_depth)
 
-        vis_gt, depth_min, depth_max = visualize_depth(gt_depth, ret_minmax=True)
-        vis_gt = visualize_depth(gt_depth, depth_min=depth_min, depth_max=depth_max)
-        vis_depth = visualize_depth(depth, depth_min=depth_min, depth_max=depth_max)
-        combined = np.concatenate([img_uint8, vis_gt, vis_depth], axis=1)  # horizontal
-
+        if gt_depth is not None and image is not None:
+            vis_gt = visualize_depth(gt_depth, depth_min=min_depth, depth_max=max_depth)
+            combined = np.concatenate([img_uint8, vis_gt, vis_depth], axis=1)  # horizontal
+        elif image is not None:
+            combined = np.concatenate([img_uint8, vis_depth], axis=1)
+        else:
+            combined = vis_depth
         # Add colorbar
-        colorbar = render_colorbar(combined.shape[0], depth_min, depth_max, width_px=200)
+        colorbar = render_colorbar(combined.shape[0], min_depth, max_depth, width_px=200)
         colorbar = cv2.resize(colorbar, (200, combined.shape[0]))  # resize to match height
         vis_with_cb = np.concatenate([combined, colorbar], axis=1)
 

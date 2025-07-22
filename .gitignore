@@ -3,6 +3,8 @@
 
 # Ignore the wandb directory
 wandb/
+test_data/
+*.tar
 
 .vscode
 .hydra
