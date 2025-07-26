@@ -6,6 +6,7 @@ import os
 import numpy as np
 
 
+
 def _make_fusion_block(in_features, features, use_bn, first_layer=False, size=None):
     return FeatureFusionDepthBlock(
         in_features,
@@ -277,10 +278,12 @@ class FeatureFusionDepthBlock(nn.Module):
             nn.Conv2d(features, features, kernel_size=3,
                       stride=1, padding=1, bias=True, groups=1),
             activation,
-            zero_module(
-                nn.Conv2d(features, features, kernel_size=3,
+            nn.Conv2d(features, features, kernel_size=3,
                           stride=1, padding=1, bias=True, groups=1)
-            )
+            # zero_module(
+            #     nn.Conv2d(features, features, kernel_size=3,
+            #               stride=1, padding=1, bias=True, groups=1)
+            # )
         )
         self.skip_add = nn.quantized.FloatFunctional()
         self.size = size

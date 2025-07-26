@@ -3,10 +3,26 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from promptda.promptda import PromptDA
 from promptda.utils.logger import Log
-from dataset import SimulatedDataset, RealDataset
+from dataset import SimulatedDataset, RealDataset, Augmentation
 from pynvml import *
 import time
 from visualize import get_visualization
+
+
+def count_parameters_in_millions(model):
+    """Returns the number of trainable parameters in a PyTorch model, in millions."""
+    num_params = sum(p.numel() for p in model.parameters())
+    return num_params/1e6
+
+def count_model_params(model):
+    total_params = count_parameters_in_millions(model)
+    vit_params = count_parameters_in_millions(model.pretrained) + count_parameters_in_millions(model.depth_head)
+    encoder_params = count_parameters_in_millions(model.pretrained)
+    decoder_params = vit_params - encoder_params
+    fusion_params = count_parameters_in_millions(model.depth_head.scratch)
+    vit_params -= fusion_params
+    depth_encoder_params = count_parameters_in_millions(model.depth_head.scratch.depth_encoder)
+    return {'total': total_params, 'vit': vit_params, 'encoder': encoder_params, 'decoder': decoder_params, 'fusion': fusion_params, 'depth_encoder': depth_encoder_params}
 
 nvmlInit()
 def log_all_gpu_stats():
@@ -85,13 +101,15 @@ def validate(model, val_loaders, step, device, args, minmax, tag="val"):
                 rgb = rgb.to(device)
                 gray = gray.to(device)
                 prompt_depth = prompt_depth.to(device)
-                target_depth = target_depth.to(device)
+                val_target = target_depth.to(device)
 
                 val_pred = forward(model, rgb, gray, prompt_depth, mode=args.mode)
-                val_pred = torch.clamp(val_pred, min=0.0, max=1.0)
                 
-                val_pred = to_target_range(val_pred, min_val=minmax[0], max_val=minmax[1])
-                val_target = to_target_range(target_depth, min_val=minmax[0], max_val=minmax[1])
+                if not args.keep_depth:
+                    val_pred = to_target_range(val_pred, min_val=minmax[0], max_val=minmax[1])
+                    val_target = to_target_range(val_target, min_val=minmax[0], max_val=minmax[1])
+
+                val_pred = torch.clamp(val_pred, min=minmax[0], max=minmax[1])
 
                 l1 = nn.functional.l1_loss(val_pred, val_target)
                 grad = gradient_loss(val_pred, val_target)
@@ -136,7 +154,7 @@ def validate(model, val_loaders, step, device, args, minmax, tag="val"):
     return all_metrics, avg_metrics
 
 
-def test(model, test_loader, step, device, args, minmax, tag="val"):
+def test(model, test_loader, step, device, args, minmax, tag="test"):
     model.eval()
     Log.info(f"Testing at step {step}...")
 
@@ -149,25 +167,29 @@ def test(model, test_loader, step, device, args, minmax, tag="val"):
             
             time_start = time.time()
             val_pred = forward(model, rgb, gray, prompt_depth, mode=args.mode)
-            val_pred = torch.clamp(val_pred, min=0.0, max=1.0)
-            val_pred = to_target_range(val_pred, min_val=minmax[0], max_val=minmax[1])
+            
+            if not args.keep_depth:
+                val_pred = to_target_range(val_pred, min_val=minmax[0], max_val=minmax[1])
+            val_pred = torch.clamp(val_pred, min=minmax[0], max=minmax[1])
+
             time_spent.append(time.time() - time_start)
 
-            # Visualization
-            input_img = rgb if "rgb" in args.mode else gray
-            input_img = input_img.squeeze().cpu().numpy().transpose(1, 2, 0)
-            val_pred = val_pred.squeeze().cpu().numpy()
-            vis_img = get_visualization(val_pred, input_img, min_depth=minmax[0], max_depth=minmax[1])
-
-            # Log to wandb
-            wandb.log({
-                f"{tag}/{idx:03d}_{fname}": wandb.Image(vis_img, caption=f"{tag} Sample {idx}: {fname}"),
-            })
+            try:
+                # Visualization
+                input_img = rgb if "rgb" in args.mode else gray
+                input_img = input_img.squeeze().cpu().numpy().transpose(1, 2, 0)
+                val_pred = val_pred.squeeze().cpu().numpy()
+                vis_img = get_visualization(val_pred, input_img, min_depth=minmax[0], max_depth=minmax[1])
+                # Log to wandb
+                wandb.log({
+                    f"{tag}/{idx:03d}_{fname}": wandb.Image(vis_img)
+                }, step=step)
+            except Exception as e:
+                Log.error(f"Error visualizing sample {idx} ({fname}): {e}")
 
     avg_time = sum(time_spent) / len(time_spent)
     Log.info(f"[Test Step {step}] Avg inference time per sample: {avg_time:.4f} seconds")
-    wandb.log({f"{tag}_avg/inference_time_sec": avg_time}, step=step)
-    wandb.finish()
+    wandb.log({f"timing/inference_time_sec": avg_time}, step=step)
     
 
 def train(args):
@@ -183,21 +205,33 @@ def train(args):
     if args.input_res[0] > -1 and args.input_res[1] > -1:
         ts = (args.input_res[0], args.input_res[1])
     ar = get_aspect_ratio(args.input_aspect_ratio)
-    train_sets = [SimulatedDataset(txt, aspect_ratio=ar, random_crop=args.random_crop, target_size=ts) for txt in train_txt]
-    val_sets   = [SimulatedDataset(txt, aspect_ratio=ar, random_crop=args.random_crop, target_size=ts) for txt in val_txt]
-    train_loaders = [DataLoader(train_set, batch_size=args.batch_size, shuffle=True) for train_set in train_sets]
-    val_loaders   = [DataLoader(val_set, batch_size=args.batch_size, shuffle=False) for val_set in val_sets]
+    pc = args.prompt_channels
+    bs = args.batch_size
+    td = args.test_downsample
+    tr = args.test_res
+    train_sets = [SimulatedDataset(txt, aspect_ratio=ar, random_crop=args.random_crop, target_size=ts, prompt_channels=pc, true_mono=args.true_mono) for txt in train_txt]
+    val_sets   = [SimulatedDataset(txt, aspect_ratio=ar, random_crop=args.random_crop, target_size=ts, prompt_channels=pc, true_mono=args.true_mono) for txt in val_txt]
+    test_sets = [RealDataset(txt, downsample=td[i], aspect_ratio=ar, target_size=(tr[2*i], tr[2*i+1]), prompt_channels=pc) for i, txt in enumerate(args.test_txt)]
+
+    train_loaders = [DataLoader(train_set, batch_size=bs, num_workers=min(os.cpu_count(), args.num_workers), shuffle=True) for train_set in train_sets]
+    val_loaders   = [DataLoader(val_set,   batch_size=bs, num_workers=min(os.cpu_count(), args.num_workers), shuffle=False) for val_set in val_sets]
+    test_loaders =  [DataLoader(test_set,  batch_size=1, shuffle=False) for test_set in test_sets]
+
     train_iters = [iter(loader) for loader in train_loaders]
     train_weights = np.array(args.sample_weights, dtype=np.float32)
     train_probs = train_weights / np.sum(train_weights)
 
-    if args.test_txt:
-        test_set = RealDataset(args.test_txt, aspect_ratio=ar, target_size=ts)
-        test_loader = DataLoader(test_set, batch_size=1, shuffle=False)
-    else:
-        test_loader = None
+    model = PromptDA(encoder=args.backbone, output_act=args.output_act, prompt_channels=pc, resnet_enabled=args.resnet_enabled, resnet_blocks_per_stage=args.resnet_blocks_per_stage)
 
-    model = PromptDA(encoder=args.backbone, output_act=args.output_act)
+    param_counts = count_model_params(model)
+    Log.info(
+        f"Model has {param_counts['total']:.2f}M parameters. "
+        f"ViT encoder: {param_counts['vit']:.2f}M, "
+        f"Encoder: {param_counts['encoder']:.2f}M, "
+        f"Decoder: {param_counts['decoder']:.2f}M, "
+        f"Fusion head: {param_counts['fusion']:.2f}M, "
+        f"Depth encoder: {param_counts['depth_encoder']:.2f}M."
+    )
     model = torch.nn.DataParallel(model)
     pretrained = torch.load(args.pretrained, map_location=DEVICE)
     model.module.load_state_dict(pretrained, strict=False)
@@ -252,6 +286,12 @@ def train(args):
             ])
             # No scheduling is used according to authors' reply
             scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1000000, gamma=0.5)
+        if step == args.augment_start_steps:
+            Log.info(f"Starting augmentation at step {step}.")
+            augment = Augmentation(args.augment_probability, args.max_p_noise, args.max_g_noise, args.max_gs_blur,
+                                   args.max_global_imbalance, args.max_local_imbalance, args.max_gs_kernels)
+            for train_set in train_sets:
+                train_set.set_augmentation(augment)
 
         model.train()
         optimizer.zero_grad()
@@ -260,10 +300,11 @@ def train(args):
         pred_depth = forward(model, rgb, gray, prompt_depth, args.mode)
         fwd_time = time.time() - fwd_start
 
-        # !!! WE ASSUME LABELS ARE IN THE RANGE [0, 1] !!!
-        pred_depth = to_target_range(pred_depth, min_val=MINMAX[0], max_val=MINMAX[1])
-        target_depth = to_target_range(target_depth, min_val=MINMAX[0], max_val=MINMAX[1])
-        # !!! ---------------------------------------- !!!
+        if not args.keep_depth:
+            # !!! WE ASSUME LABELS ARE IN THE RANGE [0, 1] !!!
+            pred_depth = to_target_range(pred_depth, min_val=MINMAX[0], max_val=MINMAX[1])
+            target_depth = to_target_range(target_depth, min_val=MINMAX[0], max_val=MINMAX[1])
+            # !!! ---------------------------------------- !!!
         
         loss_l1 = nn.functional.l1_loss(pred_depth, target_depth)
         loss_grad = gradient_loss(pred_depth, target_depth)
@@ -275,8 +316,8 @@ def train(args):
         bwd_time = time.time() - bwd_start
         scheduler.step()
         gpu_stats = log_all_gpu_stats()
-        
-        if step % 100 == 0:
+
+        if step % args.log_every == 0:
             pred_depth = torch.clamp(pred_depth, min=MINMAX[0], max=MINMAX[1])
             train_metrics = compute_metrics(pred_depth, target_depth)
             wandb.log({
@@ -303,10 +344,11 @@ def train(args):
         if step % args.validate_every == 0:
             validate(model, val_loaders, step, DEVICE, args, MINMAX, tag="val")
 
-        if test_loader and step % args.test_every == 0:
-            test(model, test_loader, step, DEVICE, args, MINMAX, tag="test")
+        if step % args.test_every == 0:
+            for i, test_loader in enumerate(test_loaders):
+                test(model, test_loader, step, DEVICE, args, MINMAX, tag=f"test_{i}")
 
-        if step % args.save_step == 0:
+        if step % args.save_every == 0:
             ckpt_dir = os.path.join(args.ckpt_dir, f"{args.exp_name}-{args.backbone}")
             os.makedirs(ckpt_dir, exist_ok=True)
             ckpt_path = os.path.join(ckpt_dir, f"step_{step}.pth")
@@ -323,35 +365,54 @@ if __name__ == "__main__":
 
     import argparse
     parser = argparse.ArgumentParser(description="Train PromptDA on HyperSim")
+
+    # Model Definition
     parser.add_argument("--backbone", type=str, default="vitb", help="Backbone architecture")
-    parser.add_argument("--pretrained", type=str, default="/scratch/bl3912/checkpoints/PromptDA/depth_anything_v2_metric_hypersim_vitb.pth", help="Pretrained backbone model")
+    parser.add_argument("--prompt-channels", type=int, default=2, help="Number of prompt channels")
+    parser.add_argument("--true-mono", action='store_true', help="Use true mono mode")
+    parser.add_argument("--output-act", type=str, default="identity", help="Last layer type (e.g., Identity, Conv2d, etc.)")
+    parser.add_argument("--mode", type=str, default="rgb_fusion", choices=["mono", "mono_fusion", "rgb_fusion", "rgb"], help="Mode of operation")
+    parser.add_argument("--resnet-enabled", action='store_true', help="Enable ResNet encoder")
+    parser.add_argument("--resnet-blocks-per-stage", type=int, default=3, help="Number of blocks per stage in ResNet")
+
+    # Training Parameters    
     parser.add_argument("--exp-name", type=str, default="default", help="Experiment name")
-    parser.add_argument("--save-step", type=int, default=10000, help="Save model every N steps")
+    parser.add_argument("--pretrained", type=str, default="/scratch/bl3912/checkpoints/PromptDA/depth_anything_v2_metric_hypersim_vitb.pth", help="Pretrained backbone model")
+    parser.add_argument("--ckpt-dir", type=str, default="/scratch/bl3912/checkpoints/PromptDA", help="Directory to save checkpoints")
     parser.add_argument("--warm-up-steps", type=int, default=10000, help="Warm-up steps")
     parser.add_argument("--train-steps", type=int, default=200000, help="Total training steps")
+    parser.add_argument("--save-every", type=int, default=10000, help="Save model every N steps")
+    parser.add_argument("--log-every", type=int, default=10, help="Log frequency")
     parser.add_argument("--validate-every", type=int, default=500, help="Validation frequency")
     parser.add_argument("--test-every", type=int, default=1000, help="Testing frequency")
     parser.add_argument("--batch-size", type=int, default=2, help="Batch size for training")
-    parser.add_argument("--ckpt-dir", type=str, default="/scratch/bl3912/checkpoints/PromptDA", help="Directory to save checkpoints")
     
-    parser.add_argument("--train-txt", type=str, nargs='+', default=["/vast/bl3912/hypersim-random-10k/train.txt"], help="Path to training text file")
-    parser.add_argument("--sample-weights", type=float, nargs='+', default=[1.0], help="Sample weights for training datasets")
-    parser.add_argument("--val-txt", type=str, nargs='+', default=["/vast/bl3912/hypersim-random-10k/val.txt"], help="Path to validation text file")
-    parser.add_argument("--test-txt", type=str, default=None, help="Path to test text file")
-
-    parser.add_argument("--disparity", action='store_true', help="Use disparity instead of depth")
-    parser.add_argument("--normalize", action='store_true', help="Whether to normalize input images")
-    parser.add_argument("--random-crop", action='store_true', help="Whether to use random cropping in training")
-
+    # Data Definition
     parser.add_argument("--d-min", type=float, default=0.2, help="Minimum depth value")
     parser.add_argument("--d-max", type=float, default=1.5, help="Maximum depth value")
-    parser.add_argument("--output-act", type=str, default="identity", help="Last layer type (e.g., Identity, Conv2d, etc.)")
-    parser.add_argument("--mode", type=str, default="rgb_fusion", choices=["mono", "mono_fusion", "rgb_fusion", "rgb"], help="Mode of operation")
+    parser.add_argument("--keep-depth", action='store_true', help="Keep depth in the input images")
+    parser.add_argument("--normalize", action='store_true', help="Whether to normalize input images")
+    parser.add_argument("--disparity", action='store_true', help="Use disparity instead of depth")
+    parser.add_argument("--random-crop", action='store_true', help="Whether to use random cropping in training")
+    parser.add_argument("--train-txt", type=str, nargs='+', default=["/vast/bl3912/hypersim-random-10k/train.txt"], help="Path to training text file")
+    parser.add_argument("--sample-weights", type=float, nargs='+', default=[1.0], help="Sample weights for training datasets")
     parser.add_argument("--input-aspect-ratio", type=str, default="None", choices=["1_1", "4_3", "16_9"], help="Aspect ratio of input images")
     parser.add_argument("--input-res", type=int, nargs='+', default=[-1, -1], help="Input image size (height and width)")
-    parser.add_argument("--pol-imbalance", action='store_true', help="Use polarization imbalance augmentation")
-    parser.add_argument("--max-gs-kernels", type=int, default=0, help="Number of Gaussian kernels for augmentation")
-    parser.add_argument("--max-gs-intensity", type=float, default=0.0, help="Maximum intensity for Gaussian kernels")
+    parser.add_argument("--val-txt", type=str, nargs='+', default=["/vast/bl3912/hypersim-random-10k/val.txt"], help="Path to validation text file")
+    parser.add_argument("--test-txt", type=str, nargs='+', default=[], help="Path to test text file")
+    parser.add_argument("--test-downsample", type=float, nargs='+', default=[1.0], help="Downsample factor for test images")
+    parser.add_argument("--test-res", type=int, nargs='+', default=[], help= "Resolution for test images, if empty, uses original size")
+    parser.add_argument("--num-workers", type=int, default=8, help="Number of workers for data loading")
+
+    # Augmentation
+    parser.add_argument("--augment-start-steps", type=int, default=1000000, help="Steps after which augmentation starts")
+    parser.add_argument("--augment-probability", type=float, default=0.5, help="Probability of applying augmentation")
+    parser.add_argument("--max-global-imbalance", type=float, default=0.0, help="Maximum global imbalance factor")
+    parser.add_argument("--max-local-imbalance", type=float, default=0.0, help="Maximum local imbalance factor")
+    parser.add_argument("--max-gs-blur", type=float, default=0, help="Maximum Gaussian blur")
+    parser.add_argument("--max-gs-kernels", type=int, default=0, help="Maximum number of Gaussian kernels for local imbalance")
+    parser.add_argument("--max-p-noise", type=float, default=0.0, help="Maximum Poisson noise factor")
+    parser.add_argument("--max-g-noise", type=float, default=0.0, help="Maximum Gaussian noise factor")
 
     args = parser.parse_args()
 

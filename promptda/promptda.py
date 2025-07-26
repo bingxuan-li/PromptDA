@@ -16,7 +16,10 @@ class PromptDA(nn.Module):
     def __init__(self,
                  encoder='vits',
                  ckpt_path=None,
-                 output_act='identity'
+                 output_act='identity',
+                 prompt_channels=2,  # Number of channels in the prompt depth
+                 resnet_enabled=False,
+                 resnet_blocks_per_stage=3
                  ):
         super().__init__()
         model_config = model_configs[encoder]
@@ -38,7 +41,10 @@ class PromptDA(nn.Module):
                                   out_channels=model_config['out_channels'],
                                   use_bn=self.use_bn,
                                   use_clstoken=self.use_clstoken,
-                                  output_act=self.output_act)
+                                  output_act=self.output_act,
+                                  prompt_channels=prompt_channels,
+                                  resnet_enabled=resnet_enabled,
+                                  resnet_blocks_per_stage=resnet_blocks_per_stage)
 
         # mean and std of the pretrained dinov2 model
         self.register_buffer('_mean', torch.tensor(
@@ -101,8 +107,7 @@ class PromptDA(nn.Module):
         else:
             Log.warn(f'Checkpoint {ckpt_path} not found')
 
-    def forward(self, x, prompt_depth=None):
-        assert prompt_depth is not None, 'prompt_depth is required'
+    def forward(self, x, prompt_depth):
         # prompt_depth, min_val, max_val = self.normalize(prompt_depth)
         h, w = x.shape[-2:]
         features = self.pretrained.get_intermediate_layers(

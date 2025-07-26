@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from promptda.model.blocks import _make_scratch, _make_fusion_block
+from promptda.model.resnet import ResNetEncoder
 
 class InverseShift(nn.Module):
     def __init__(self, epsilon=0.1):
@@ -21,11 +22,15 @@ class DPTHead(nn.Module):
                  out_channels=[256, 512, 1024, 1024],
                  use_bn=False,
                  use_clstoken=False,
-                 output_act='sigmoid'):
+                 output_act='sigmoid',
+                 prompt_channels=2,
+                 resnet_enabled=False,
+                 resnet_blocks_per_stage=3):
         super(DPTHead, self).__init__()
 
         self.nclass = nclass
         self.use_clstoken = use_clstoken
+        self.resnet_enabled = resnet_enabled
 
         self.projects = nn.ModuleList([
             nn.Conv2d(
@@ -76,8 +81,22 @@ class DPTHead(nn.Module):
 
         self.scratch.stem_transpose = None
 
-        self.scratch.depth_extractor = _make_fusion_block(
-            2, features, use_bn, first_layer=True)
+        if resnet_enabled:
+            self.scratch.depth_encoder = _make_scratch(
+                out_channels,
+                features,
+                groups=1,
+                expand=False,
+            )
+            self.scratch.depth_encoder.encoder = ResNetEncoder(
+                in_channels=prompt_channels,
+                blocks_per_stage=resnet_blocks_per_stage,
+                out_channels=out_channels
+            )
+        else:
+            # If ResNet is not enabled, create a simple fusion block
+            self.scratch.depth_extractor = _make_fusion_block(
+                prompt_channels, features, use_bn, first_layer=True)
 
         self.scratch.refinenet1 = _make_fusion_block(
             features, features, use_bn)
@@ -144,17 +163,34 @@ class DPTHead(nn.Module):
         layer_3_rn = self.scratch.layer3_rn(layer_3)
         layer_4_rn = self.scratch.layer4_rn(layer_4)
 
-        path_0 = self.scratch.depth_extractor(
-            prompt, size=prompt.shape[-2:], prompt_depth=prompt)
+        if self.resnet_enabled:
+            prompt_features = self.scratch.depth_encoder.encoder(prompt)
+            pf_1_rn = self.scratch.depth_encoder.layer1_rn(prompt_features[0])
+            pf_2_rn = self.scratch.depth_encoder.layer2_rn(prompt_features[1])
+            pf_3_rn = self.scratch.depth_encoder.layer3_rn(prompt_features[2])
+            pf_4_rn = self.scratch.depth_encoder.layer4_rn(prompt_features[3])
 
-        path_4 = self.scratch.refinenet4(
-            layer_4_rn, size=layer_3_rn.shape[2:], prompt_depth=path_0)
-        path_3 = self.scratch.refinenet3(
-            path_4, layer_3_rn, size=layer_2_rn.shape[2:], prompt_depth=path_0)
-        path_2 = self.scratch.refinenet2(
-            path_3, layer_2_rn, size=layer_1_rn.shape[2:], prompt_depth=path_0)
-        path_1 = self.scratch.refinenet1(
-            path_2, layer_1_rn, prompt_depth=path_0)
+            path_4 = self.scratch.refinenet4(
+                layer_4_rn, size=layer_3_rn.shape[2:], prompt_depth=pf_4_rn)
+            path_3 = self.scratch.refinenet3(
+                path_4, layer_3_rn, size=layer_2_rn.shape[2:], prompt_depth=pf_3_rn)
+            path_2 = self.scratch.refinenet2(
+                path_3, layer_2_rn, size=layer_1_rn.shape[2:], prompt_depth=pf_2_rn)
+            path_1 = self.scratch.refinenet1(
+                path_2, layer_1_rn, prompt_depth=pf_1_rn)
+        else:
+            path_0 = self.scratch.depth_extractor(
+                prompt, size=prompt.shape[-2:], prompt_depth=prompt)
+            # 896 -> 768x32 384x64 192x128 96x256
+            path_4 = self.scratch.refinenet4(
+                layer_4_rn, size=layer_3_rn.shape[2:], prompt_depth=path_0)
+            path_3 = self.scratch.refinenet3(
+                path_4, layer_3_rn, size=layer_2_rn.shape[2:], prompt_depth=path_0)
+            path_2 = self.scratch.refinenet2(
+                path_3, layer_2_rn, size=layer_1_rn.shape[2:], prompt_depth=path_0)
+            path_1 = self.scratch.refinenet1(
+                path_2, layer_1_rn, prompt_depth=path_0)
+        
         out = self.scratch.output_conv1(path_1)
         out_feat = F.interpolate(
             out, (int(patch_h * 14), int(patch_w * 14)),

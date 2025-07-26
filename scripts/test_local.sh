@@ -1,0 +1,42 @@
+# python test_train.py -b vitb -e MITCGH4k-vitb-bs4-sigmoid-0717-vitb -s 40000 -m hypersim
+
+WANDB_DIR=/home/lbx/code/PromptDA/wandb;
+WANDB_DIR=$WANDB_DIR python train.py \
+    --backbone vitb \
+    --pretrained /home/lbx/code/PromptDA/checkpoints/depth_anything_v2_metric_hypersim_vitb.pth \
+    --prompt-channels 3 \
+    --keep-depth \
+    --d-min 0.5 \
+    --d-max 1.2 \
+    --exp-name hybrid-vitb-bs16-fix_518-mono_fusion \
+    --warm-up-steps 1000 \
+    --train-steps 200000 \
+    --validate-every 100 \
+    --test-every 100 \
+    --save-every 2500 \
+    --log-every 1 \
+    --batch-size 4 \
+    --ckpt-dir  /home/lbx/code/PromptDA/checkpoints \
+    --train-txt /home/lbx/dataset/txt/sample_MIT-CGH4k_random_5_12.txt \
+    --val-txt   /home/lbx/dataset/txt/sample_MIT-CGH4k_random_5_12.txt \
+    --sample-weights 1.0 \
+    --test-txt  /home/lbx/code/PromptDA/test_data/test_data.txt \
+    --num-workers 16 \
+    --test-downsample 0.5 \
+    --resnet-enabled \
+    --resnet-blocks-per-stage 3 \
+    --test-res 900 900 \
+    --random-crop \
+    --output-act identity \
+    --mode mono_fusion \
+    --true-mono \
+    --input-res 518 518 \
+    --augment-start-steps 1 \
+    --augment-prob 1.0 \
+    --max-global-imbalance 0.1 \
+    --max-local-imbalance 0.2 \
+    --max-gs-blur 2 \
+    --max-gs-kernels 10 \
+    --max-p-noise 1 \
+    --max-g-noise 0.05 \
+    --exp-name 0726-local-test
