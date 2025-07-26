@@ -141,8 +141,6 @@ class SimulatedDataset(Dataset):
             lines = f.readlines()
         self.src = txt_path
         self.pairs = [line.strip().split(',') for line in lines]
-        self.disparity = True if 'disparity' in txt_path.lower() else False
-        self.normalize = True if 'normalize' in txt_path.lower() else False
         self.random_crop = random_crop
         self.multiple_of = multiple_of
         self.aspect_ratio = aspect_ratio
@@ -204,10 +202,6 @@ class SimulatedDataset(Dataset):
         target_depth = load_depth(depth_path, to_tensor=False)
         target_depth = target_crop(target_depth, frame)
         target_depth = torch.from_numpy(target_depth)
-        if self.disparity:
-            target_depth = 1.0 / (target_depth + 1e-6)
-        if self.normalize:
-            target_depth = (target_depth - target_depth.min()) / (target_depth.max() - target_depth.min())
         return rgb, gray, prompt_depth, target_depth.unsqueeze(0)
 
 

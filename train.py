@@ -391,8 +391,6 @@ if __name__ == "__main__":
     parser.add_argument("--d-min", type=float, default=0.2, help="Minimum depth value")
     parser.add_argument("--d-max", type=float, default=1.5, help="Maximum depth value")
     parser.add_argument("--keep-depth", action='store_true', help="Keep depth in the input images")
-    parser.add_argument("--normalize", action='store_true', help="Whether to normalize input images")
-    parser.add_argument("--disparity", action='store_true', help="Use disparity instead of depth")
     parser.add_argument("--random-crop", action='store_true', help="Whether to use random cropping in training")
     parser.add_argument("--train-txt", type=str, nargs='+', default=["/vast/bl3912/hypersim-random-10k/train.txt"], help="Path to training text file")
     parser.add_argument("--sample-weights", type=float, nargs='+', default=[1.0], help="Sample weights for training datasets")
