@@ -69,12 +69,12 @@ class Augmentation():
         self.alpha = 1
         self.beta = 3
 
-    def augment(self, img):
+    def augment(self, img, gray=False):
         if random.random() > self.augment_prob:
             return img
 
         H, W = img.shape[-2:]
-        if self.max_gs_blur > 0:
+        if self.max_gs_blur and not gray> 0:
             max_gs_blur = self.max_gs_blur
             gs_blur = np.random.uniform(0, max_gs_blur)
             img = torch.from_numpy(gaussian_filter(img.numpy(), sigma=gs_blur)).to(img.dtype)
@@ -136,7 +136,7 @@ class Augmentation():
 
 class SimulatedDataset(Dataset):
     def __init__(self, txt_path, multiple_of=14, aspect_ratio=None, random_crop=False, 
-                 target_size=None, true_mono=False, prompt_channels=2):
+                 target_size=None, prompt_channels=2):
         with open(txt_path, 'r') as f:
             lines = f.readlines()
         self.src = txt_path
@@ -147,7 +147,6 @@ class SimulatedDataset(Dataset):
         self.target_size = target_size
         self.prompt_channels = prompt_channels
         self.augmentation = None
-        self.true_mono = true_mono
 
     def set_augmentation(self, augmentation):
         """
@@ -174,26 +173,25 @@ class SimulatedDataset(Dataset):
         img1, img2, gray = target_crop(img1, frame), target_crop(img2, frame), target_crop(gray, frame)
         img1, img2 = torch.from_numpy(img1), torch.from_numpy(img2)
 
-        # Ensure img1 and gray is augmented together
-        if self.augmentation is not None:
-            img1 = self.augmentation.augment(img1)
-            img2 = self.augmentation.augment(img2)
         
         # Always apply Gaussian blur to gray image
         gs_blur = np.random.uniform(1, 5)
         gray = torch.from_numpy(gaussian_filter(gray, sigma=gs_blur)).to(dtype=img1.dtype)
+
+        # Ensure img1 and gray is augmented together
+        if self.augmentation is not None:
+            img1 = self.augmentation.augment(img1)
+            img2 = self.augmentation.augment(img2)
+            gray = self.augmentation.augment(gray, gray=True)
 
         img1 = img1.unsqueeze(0)
         img2 = img2.unsqueeze(0)
         gray = gray.unsqueeze(0)
 
         rgb = torch.cat([img1, img2, (img1 + img2) / 2], dim=0)
+        true_gray = torch.cat([gray, gray, gray], dim=0)
+        sim_gray = torch.cat([img1, img1, img1], dim=0)
 
-        if self.true_mono:
-            gray = torch.cat([gray, gray, gray], dim=0)
-        else:
-            gray = torch.cat([img1, img1, img1], dim=0)
-            
         if self.prompt_channels == 2:
             prompt_depth = torch.cat([img1, img2], dim=0)
         elif self.prompt_channels == 3:
@@ -202,7 +200,7 @@ class SimulatedDataset(Dataset):
         target_depth = load_depth(depth_path, to_tensor=False)
         target_depth = target_crop(target_depth, frame)
         target_depth = torch.from_numpy(target_depth)
-        return rgb, gray, prompt_depth, target_depth.unsqueeze(0)
+        return rgb, sim_gray, true_gray, prompt_depth, target_depth.unsqueeze(0)
 
 
 class RealDataset(Dataset):

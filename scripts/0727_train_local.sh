@@ -1,0 +1,36 @@
+python train.py \
+    --exp-name 0728_local-mono_fusion-hybrid-518-res1-aug_weak_0.25-schedule0.8-bs4-d_0.3_1.2-vitb \
+    --backbone vitb \
+    --prompt-channels 3 \
+    --output-act identity \
+    --mode mono_fusion \
+    --resnet-enabled \
+    --resnet-blocks-per-stage 1 \
+    --pretrained /home/lbx/code/PromptDA/checkpoints/depth_anything_v2_metric_hypersim_vitb.pth \
+    --ckpt-dir /home/lbx/code/PromptDA/checkpoints \
+    --warm-up-steps 1000 \
+    --train-steps 200000 \
+    --save-every 2000 \
+    --log-every 10 \
+    --validate-every 1000 \
+    --test-every 2000 \
+    --batch-size 4 \
+    --d-min 0.3 \
+    --d-max 1.2 \
+    --random-crop \
+    --train-txt /home/lbx/dataset/txt/all_hypersim_random_0.3_1.2.txt /home/lbx/dataset/txt/all_flyingthings3d_random_0.3_1.2.txt /home/lbx/dataset/txt/all_MIT-CGH4k_random_0.3_1.2.txt /home/lbx/dataset/txt/all_nano3d-video_norm_0.3_1.2.txt \
+    --sample-weights 0.7 0.15 0.10 0.05 \
+    --input-res 518 518 \
+    --val-txt /home/lbx/dataset/txt/test_hypersim_random_0.3_1.2.txt /home/lbx/dataset/txt/test_flyingthings3d_random_0.3_1.2.txt /home/lbx/dataset/txt/test_MIT-CGH4k_random_0.3_1.2.txt /home/lbx/dataset/txt/test_nano3d-video_norm_0.3_1.2.txt \
+    --test-txt /home/lbx/code/PromptDA/test_data/test_data.txt /home/lbx/code/PromptDA/test_data/test_data_d2.txt /home/lbx/dataset/test/hypersim_0.3_1.2_10.txt /home/lbx/dataset/test/flyingthings3d_0.3_1.2_10.txt /home/lbx/dataset/test/MIT-CGH4k_0.3_1.2_10.txt /home/lbx/dataset/test/nano3d-video_0.3_1.2_20.txt \
+    --test-downsample 0.5 1.0 1.0 1.0 1.0 1.0 \
+    --test-res 840 840 840 840 768 1024 540 960 1536 1536 768 1024 \
+    --num-workers 4 \
+    --augment-start-steps 2000 \
+    --augment-probability 0.25 \
+    --max-global-imbalance 0.1 \
+    --max-local-imbalance 0.2 \
+    --max-gs-blur 2 \
+    --max-gs-kernels 10 \
+    --max-p-noise 0.8 \
+    --max-g-noise 0.04

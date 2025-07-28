@@ -21,7 +21,7 @@ WANDB_DIR=$WANDB_DIR python train.py \
     --val-txt   /home/lbx/dataset/txt/sample_MIT-CGH4k_random_5_12.txt \
     --sample-weights 1.0 \
     --test-txt  /home/lbx/code/PromptDA/test_data/test_data.txt \
-    --num-workers 16 \
+    --num-workers 4 \
     --test-downsample 0.5 \
     --resnet-enabled \
     --resnet-blocks-per-stage 3 \

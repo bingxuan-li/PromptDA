@@ -73,12 +73,16 @@ def get_aspect_ratio(aspect_ratio_str):
     else:
         None
 
-def forward(model, rgb, gray, prompt_depth, mode):
+def forward(model, rgb, sim_gray, true_gray, prompt_depth, mode):
     zeros = torch.zeros_like(prompt_depth, dtype=prompt_depth.dtype, device=prompt_depth.device)
     if mode == "mono":
-        return model.forward(gray, zeros)
+        return model.forward(sim_gray, zeros)
+    elif mode == "true_mono":
+        return model.forward(true_gray, zeros)
     elif mode == "mono_fusion":
-        return model.forward(gray, prompt_depth)
+        return model.forward(sim_gray, prompt_depth)
+    elif mode == "true_mono_fusion":
+        return model.forward(true_gray, prompt_depth)
     elif mode == "rgb_fusion":
         return model.forward(rgb, prompt_depth)
     elif mode == "rgb":
@@ -97,18 +101,14 @@ def validate(model, val_loaders, step, device, args, minmax, tag="val"):
     with torch.no_grad():
         for val_idx, val_loader in enumerate(val_loaders):
             metrics_dict = {'l1': 0.0, 'grad': 0.0, 'mae': 0.0, 'abs_rel': 0.0}
-            for rgb, gray, prompt_depth, target_depth in val_loader:
+            for rgb, sim_gray, true_gray, prompt_depth, target_depth in val_loader:
                 rgb = rgb.to(device)
-                gray = gray.to(device)
+                sim_gray = sim_gray.to(device)
+                true_gray = true_gray.to(device)
                 prompt_depth = prompt_depth.to(device)
                 val_target = target_depth.to(device)
 
-                val_pred = forward(model, rgb, gray, prompt_depth, mode=args.mode)
-                
-                if not args.keep_depth:
-                    val_pred = to_target_range(val_pred, min_val=minmax[0], max_val=minmax[1])
-                    val_target = to_target_range(val_target, min_val=minmax[0], max_val=minmax[1])
-
+                val_pred = forward(model, rgb, sim_gray, true_gray, prompt_depth, mode=args.mode)
                 val_pred = torch.clamp(val_pred, min=minmax[0], max=minmax[1])
 
                 l1 = nn.functional.l1_loss(val_pred, val_target)
@@ -166,10 +166,7 @@ def test(model, test_loader, step, device, args, minmax, tag="test"):
             prompt_depth = prompt_depth.to(device)
             
             time_start = time.time()
-            val_pred = forward(model, rgb, gray, prompt_depth, mode=args.mode)
-            
-            if not args.keep_depth:
-                val_pred = to_target_range(val_pred, min_val=minmax[0], max_val=minmax[1])
+            val_pred = forward(model, rgb, gray, gray, prompt_depth, mode=args.mode)
             val_pred = torch.clamp(val_pred, min=minmax[0], max=minmax[1])
 
             time_spent.append(time.time() - time_start)
@@ -194,9 +191,9 @@ def test(model, test_loader, step, device, args, minmax, tag="test"):
 
 def train(args):
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    LR_VIT_WARMUP = 5e-6
-    LR_VIT = 5e-6
-    LR_OTHER = 5e-5
+    LR_VIT_WARMUP = 4e-6
+    LR_VIT = 4e-6
+    LR_OTHER = 4e-5
     MINMAX = (args.d_min, args.d_max)
 
     train_txt = args.train_txt
@@ -209,9 +206,9 @@ def train(args):
     bs = args.batch_size
     td = args.test_downsample
     tr = args.test_res
-    train_sets = [SimulatedDataset(txt, aspect_ratio=ar, random_crop=args.random_crop, target_size=ts, prompt_channels=pc, true_mono=args.true_mono) for txt in train_txt]
-    val_sets   = [SimulatedDataset(txt, aspect_ratio=ar, random_crop=args.random_crop, target_size=ts, prompt_channels=pc, true_mono=args.true_mono) for txt in val_txt]
-    test_sets = [RealDataset(txt, downsample=td[i], aspect_ratio=ar, target_size=(tr[2*i], tr[2*i+1]), prompt_channels=pc) for i, txt in enumerate(args.test_txt)]
+    train_sets = [SimulatedDataset(txt, aspect_ratio=ar, random_crop=args.random_crop, target_size=ts, prompt_channels=pc) for txt in train_txt]
+    val_sets   = [SimulatedDataset(txt, aspect_ratio=ar, random_crop=args.random_crop, target_size=ts, prompt_channels=pc) for txt in val_txt]
+    test_sets =  [RealDataset(txt, downsample=td[i], aspect_ratio=ar, target_size=(tr[2*i], tr[2*i+1]), prompt_channels=pc) for i, txt in enumerate(args.test_txt)]
 
     train_loaders = [DataLoader(train_set, batch_size=bs, num_workers=min(os.cpu_count(), args.num_workers), shuffle=True) for train_set in train_sets]
     val_loaders   = [DataLoader(val_set,   batch_size=bs, num_workers=min(os.cpu_count(), args.num_workers), shuffle=False) for val_set in val_sets]
@@ -249,7 +246,7 @@ def train(args):
         {'params': other_params, 'lr': 0.0}
     ])
     # No scheduling is used according to authors' reply
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1000000, gamma=0.5)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10000, gamma=0.8)
 
     wandb.init(project="PromptDA-Training", name=args.exp_name)
     wandb.config.update(vars(args))
@@ -262,17 +259,18 @@ def train(args):
         train_iter = train_iters[dataset_idx]
         try:
             data_start = time.time()
-            rgb, gray, prompt_depth, target_depth = next(train_iter)
+            rgb, sim_gray, true_gray, prompt_depth, target_depth = next(train_iter)
             data_time = time.time() - data_start
         except StopIteration:
             train_iters[dataset_idx] = iter(train_loaders[dataset_idx])
             train_iter = train_iters[dataset_idx]
-            rgb, gray, prompt_depth, target_depth = next(train_iter)
+            rgb, sim_gray, true_gray, prompt_depth, target_depth = next(train_iter)
             data_time = 0.0
 
         step += 1
         rgb          = rgb.to(DEVICE)
-        gray         = gray.to(DEVICE)
+        sim_gray     = sim_gray.to(DEVICE)
+        true_gray    = true_gray.to(DEVICE)
         prompt_depth = prompt_depth.to(DEVICE)
         target_depth = target_depth.to(DEVICE)
 
@@ -285,7 +283,7 @@ def train(args):
                 {'params': other_params, 'lr': LR_OTHER}
             ])
             # No scheduling is used according to authors' reply
-            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1000000, gamma=0.5)
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10000, gamma=0.8)
         if step == args.augment_start_steps:
             Log.info(f"Starting augmentation at step {step}.")
             augment = Augmentation(args.augment_probability, args.max_p_noise, args.max_g_noise, args.max_gs_blur,
@@ -297,15 +295,9 @@ def train(args):
         optimizer.zero_grad()
 
         fwd_start = time.time()
-        pred_depth = forward(model, rgb, gray, prompt_depth, args.mode)
+        pred_depth = forward(model, rgb, sim_gray, true_gray, prompt_depth, args.mode)
         fwd_time = time.time() - fwd_start
 
-        if not args.keep_depth:
-            # !!! WE ASSUME LABELS ARE IN THE RANGE [0, 1] !!!
-            pred_depth = to_target_range(pred_depth, min_val=MINMAX[0], max_val=MINMAX[1])
-            target_depth = to_target_range(target_depth, min_val=MINMAX[0], max_val=MINMAX[1])
-            # !!! ---------------------------------------- !!!
-        
         loss_l1 = nn.functional.l1_loss(pred_depth, target_depth)
         loss_grad = gradient_loss(pred_depth, target_depth)
         loss = loss_l1 + 0.5 * loss_grad
@@ -369,9 +361,8 @@ if __name__ == "__main__":
     # Model Definition
     parser.add_argument("--backbone", type=str, default="vitb", help="Backbone architecture")
     parser.add_argument("--prompt-channels", type=int, default=2, help="Number of prompt channels")
-    parser.add_argument("--true-mono", action='store_true', help="Use true mono mode")
     parser.add_argument("--output-act", type=str, default="identity", help="Last layer type (e.g., Identity, Conv2d, etc.)")
-    parser.add_argument("--mode", type=str, default="rgb_fusion", choices=["mono", "mono_fusion", "rgb_fusion", "rgb"], help="Mode of operation")
+    parser.add_argument("--mode", type=str, default="rgb_fusion", choices=["true_mono", "mono", "true_mono_fusion", "mono_fusion", "rgb_fusion", "rgb"], help="Mode of operation")
     parser.add_argument("--resnet-enabled", action='store_true', help="Enable ResNet encoder")
     parser.add_argument("--resnet-blocks-per-stage", type=int, default=3, help="Number of blocks per stage in ResNet")
 
@@ -390,7 +381,6 @@ if __name__ == "__main__":
     # Data Definition
     parser.add_argument("--d-min", type=float, default=0.2, help="Minimum depth value")
     parser.add_argument("--d-max", type=float, default=1.5, help="Maximum depth value")
-    parser.add_argument("--keep-depth", action='store_true', help="Keep depth in the input images")
     parser.add_argument("--random-crop", action='store_true', help="Whether to use random cropping in training")
     parser.add_argument("--train-txt", type=str, nargs='+', default=["/vast/bl3912/hypersim-random-10k/train.txt"], help="Path to training text file")
     parser.add_argument("--sample-weights", type=float, nargs='+', default=[1.0], help="Sample weights for training datasets")
