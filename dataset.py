@@ -91,7 +91,7 @@ class Augmentation():
             y_grid, x_grid = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
             x_grid = x_grid.float()
             y_grid = y_grid.float()
-            n_kernels = random.randint(0, self.max_gs_kernels)
+            n_kernels = random.randint(1, self.max_gs_kernels)
             for _ in range(n_kernels):
                 # Random center
                 cx = random.uniform(0, W - 1)
@@ -112,14 +112,15 @@ class Augmentation():
                 x_rot = cos_t * x_shift + sin_t * y_shift
                 y_rot = -sin_t * x_shift + cos_t * y_shift
                 gauss = torch.exp(-((x_rot / sigma_x) ** 2 + (y_rot / sigma_y) ** 2) / 2)
-
-                local_imbalance  = np.random.beta(self.alpha, self.beta) * self.max_local_imbalance
                 if np.random.random() < 0.5:
-                    local_imbalance = -local_imbalance
-                gauss = gauss * local_imbalance
-                # Broadcast to channels
+                    gauss = -gauss  # Randomly flip the sign
                 mask += gauss
+            if mask.abs().max() > 1e-6:
+                mask = mask / mask.abs().max()  # Normalize the mask
+            local_imbalance  = np.random.beta(self.alpha, self.beta) * self.max_local_imbalance
+            mask = mask * local_imbalance
             img = img * (1 + mask)
+        img = torch.clamp(img, min=0)  # Ensure non-negative value
         # Add shot noise to the output images
         if self.max_p_noise > 0:
             min_noise = 1e-3 * self.max_p_noise  # avoid divide-by-zero or huge `times`
@@ -136,7 +137,7 @@ class Augmentation():
 
 class SimulatedDataset(Dataset):
     def __init__(self, txt_path, multiple_of=14, aspect_ratio=None, random_crop=False, 
-                 target_size=None, prompt_channels=2):
+                 target_size=None, prompt_channels=2, confuse_lens_z=None):
         with open(txt_path, 'r') as f:
             lines = f.readlines()
         self.src = txt_path
@@ -147,6 +148,7 @@ class SimulatedDataset(Dataset):
         self.target_size = target_size
         self.prompt_channels = prompt_channels
         self.augmentation = None
+        self.confuse_lens_z = confuse_lens_z
 
     def set_augmentation(self, augmentation):
         """
@@ -165,6 +167,11 @@ class SimulatedDataset(Dataset):
     def __getitem__(self, idx):
         img1_path = self.pairs[idx][0].strip()
         img2_path = self.pairs[idx][1].strip()
+        if self.confuse_lens_z is not None and len(self.confuse_lens_z) >= 1:
+            rand_lens_z = random.choice(self.confuse_lens_z)
+            img1_path = img1_path.replace('z180.0', rand_lens_z)
+            img2_path = img2_path.replace('z180.0', rand_lens_z)
+
         depth_path = self.pairs[idx][2].strip()
         gray_path = self.pairs[idx][3].strip() if len(self.pairs[idx]) > 3 else img1_path
 
@@ -242,4 +249,4 @@ class RealDataset(Dataset):
         elif self.prompt_channels == 3:
             prompt_depth = torch.cat([img1, img2, (img1-img2)], dim=0)
 
-        return rgb, gray, prompt_depth, self.pairs[idx][0].strip().split('/')[-1].rsplit('_', 1)[0]  # Return filename without extension
+        return rgb, gray, prompt_depth, self.pairs[idx][0].strip().split('/')[-1].rsplit('.', 1)[0]  # Return filename without extension

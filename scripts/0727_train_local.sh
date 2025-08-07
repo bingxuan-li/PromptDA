@@ -1,5 +1,5 @@
 python train.py \
-    --exp-name 0728_local-mono_fusion-hybrid-518-res1-aug_weak_0.25-schedule0.8-bs4-d_0.3_1.2-vitb \
+    --exp-name 0731_local-mono_fusion-hybrid-518-res1-aug_weak_0.25-schedule0.8-bs4-d_0.3_1.2-vitb \
     --backbone vitb \
     --prompt-channels 3 \
     --output-act identity \

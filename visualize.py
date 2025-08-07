@@ -6,6 +6,36 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.colorbar import ColorbarBase
 from matplotlib.colors import Normalize
 
+def overlay_text_on_image(
+    image: np.ndarray,
+    text: str,
+    pos=(15, 15),
+    font=cv2.FONT_HERSHEY_SIMPLEX,
+    font_scale=0.8,
+    color=(0, 255, 0),  # Green
+    thickness=1,
+    with_bg=False
+) -> np.ndarray:
+    """
+    Overlays text on an image (BGR or RGB or RGBA).
+    If with_bg is True, adds a black background behind the text.
+    Returns the image with text drawn on top.
+    """
+    if with_bg:
+        text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
+        x, y = pos
+        cv2.rectangle(
+            image,
+            (x - 2, y - text_size[1] - 2),
+            (x + text_size[0] + 2, y + 4),
+            (0, 0, 0),
+            thickness=cv2.FILLED
+        )
+    cv2.putText(image, text, pos, font, font_scale, color, thickness, lineType=cv2.LINE_AA)
+    return image
+
+
+
 def render_colorbar(height, depth_min, depth_max, cmap='Spectral', width_px=120):
     """
     Renders a vertical colorbar with labeled ticks using the specified colormap and depth range.
@@ -64,7 +94,6 @@ def visualize_depth(depth: np.ndarray,
 def get_visualization(depth, image, min_depth=0.2, max_depth=1.5):
     vis_depth = visualize_depth(depth, depth_min=min_depth, depth_max=max_depth)
     img_uint8 = np.clip(image * 255.0, 0, 255).astype(np.uint8)
-    vis_depth = visualize_depth(depth, depth_min=0.2, depth_max=1.5)
     combined = np.concatenate([img_uint8, vis_depth], axis=1)
     # Add colorbar
     colorbar = render_colorbar(combined.shape[0], min_depth, max_depth, width_px=200)

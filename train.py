@@ -5,14 +5,65 @@ from promptda.promptda import PromptDA
 from promptda.utils.logger import Log
 from dataset import SimulatedDataset, RealDataset, Augmentation
 from pynvml import *
-import time
-from visualize import get_visualization
+import time, glob
+from visualize import visualize_depth, overlay_text_on_image
+
+def finalize(model, ckpt, test_loader, tag, args):
+    with torch.no_grad():
+        ckpt_list = sorted(glob.glob(os.path.join(ckpt, '*.pth')))
+        for flip in [True, False]:
+            image_v = []
+            for ckpt in ckpt_list:
+                params = torch.load(ckpt, map_location='cuda')
+                model.module.load_state_dict(params['model_state_dict'], strict=False)
+                model = model.to('cuda').eval()
+                image_h = []
+                for idx, (rgb, gray, prompt_depth, fname) in enumerate(test_loader):
+                    if flip:
+                        img1, img2 = img2, img1
+                    rgb = rgb.to('cuda')
+                    gray = gray.to('cuda')
+                    prompt_depth = prompt_depth.to('cuda')
+
+                    pred = forward(model, rgb, gray, gray, prompt_depth, mode=args.mode)
+                    pred = torch.clamp(pred, min=0.3, max=1.2)
+
+                    pred = pred.squeeze().cpu().numpy()
+                    if 'rgb' in args.mode:
+                        img = rgb
+                    else:
+                        img = gray
+                    img = img.squeeze().cpu().numpy().transpose(1, 2, 0)
+                    img = (img * 255.0).astype(np.uint8)
+                    if idx == 0:
+                        img = overlay_text_on_image(img, f"{params['step']}")
+                    else:
+                        img = overlay_text_on_image(img, f"{fname}")
+                    depth_vis = visualize_depth(pred, depth_min=0.3, depth_max=1.2, cmap='Spectral')
+                    combined = np.hstack((img, depth_vis))
+                    combined = cv2.resize(combined, (0, 0), fx=0.2, fy=0.2, interpolation=cv2.INTER_AREA)
+                    combined = cv2.cvtColor(combined, cv2.COLOR_RGB2BGR)
+                    image_h.append(combined)
+                image_h = np.hstack(image_h)
+                image_v.append(image_h)
+            image_v = np.vstack(image_v)
+            fname = f"{args.exp_name}_{tag}_flip_{flip}"
+            prefix = f'./tmp/0806/flip_{flip}/{args.exp_name}'
+            os.makedirs(prefix, exist_ok=True)
+            cv2.imwrite(os.path.join(f'{prefix}', f"{fname}.jpg"), image_v, [cv2.IMWRITE_JPEG_QUALITY, 80])
 
 
 def count_parameters_in_millions(model):
     """Returns the number of trainable parameters in a PyTorch model, in millions."""
     num_params = sum(p.numel() for p in model.parameters())
     return num_params/1e6
+
+def has_nested_attr(obj, attr_path):
+    for attr in attr_path.split('.'):
+        if not hasattr(obj, attr):
+            return False
+        obj = getattr(obj, attr)
+    return True
 
 def count_model_params(model):
     total_params = count_parameters_in_millions(model)
@@ -21,7 +72,10 @@ def count_model_params(model):
     decoder_params = vit_params - encoder_params
     fusion_params = count_parameters_in_millions(model.depth_head.scratch)
     vit_params -= fusion_params
-    depth_encoder_params = count_parameters_in_millions(model.depth_head.scratch.depth_encoder)
+    if has_nested_attr(model, "depth_head.scratch.depth_encoder"):
+        depth_encoder_params = count_parameters_in_millions(model.depth_head.scratch.depth_encoder)
+    else:
+        depth_encoder_params = 0.0
     return {'total': total_params, 'vit': vit_params, 'encoder': encoder_params, 'decoder': decoder_params, 'fusion': fusion_params, 'depth_encoder': depth_encoder_params}
 
 nvmlInit()
@@ -160,6 +214,7 @@ def test(model, test_loader, step, device, args, minmax, tag="test"):
 
     time_spent = []
     with torch.no_grad(): 
+        combined_images = []
         for idx, (rgb, gray, prompt_depth, fname) in enumerate(test_loader):
             rgb = rgb.to(device)
             gray = gray.to(device)
@@ -170,19 +225,35 @@ def test(model, test_loader, step, device, args, minmax, tag="test"):
             val_pred = torch.clamp(val_pred, min=minmax[0], max=minmax[1])
 
             time_spent.append(time.time() - time_start)
-
+        
             try:
                 # Visualization
+                # encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 75]
+                # success, encoded_img = cv2.imencode('.jpg', vis_img, encode_param)
+                # os.makedirs('tmp', exist_ok=True)
+                # if success:
+                #     with open('tmp/tmp.jpg', 'wb') as f:
+                #         f.write(encoded_img.tobytes())
+                # Log to wandb
                 input_img = rgb if "rgb" in args.mode else gray
                 input_img = input_img.squeeze().cpu().numpy().transpose(1, 2, 0)
                 val_pred = val_pred.squeeze().cpu().numpy()
-                vis_img = get_visualization(val_pred, input_img, min_depth=minmax[0], max_depth=minmax[1])
-                # Log to wandb
-                wandb.log({
-                    f"{tag}/{idx:03d}_{fname}": wandb.Image(vis_img)
-                }, step=step)
+
+                img = (input_img * 255.0).astype(np.uint8)
+                img = overlay_text_on_image(img, f"{fname}")
+                depth_vis = visualize_depth(val_pred, depth_min=minmax[0], depth_max=minmax[1], cmap='Spectral')
+                combined = np.hstack([img, depth_vis])
+                # vis_img = get_visualization(val_pred, input_img, min_depth=minmax[0], max_depth=minmax[1])
+                combined = cv2.resize(combined, (0, 0), fx=0.2, fy=0.2)  # Downsample for visualization
+                combined_images.append(combined)
             except Exception as e:
                 Log.error(f"Error visualizing sample {idx} ({fname}): {e}")
+        combined_images = np.hstack(combined_images) if combined_images else None
+        if combined_images is not None:
+            wandb.log({
+                f"{tag}": wandb.Image(combined_images)
+            }, step=step)
+
 
     avg_time = sum(time_spent) / len(time_spent)
     Log.info(f"[Test Step {step}] Avg inference time per sample: {avg_time:.4f} seconds")
@@ -191,9 +262,9 @@ def test(model, test_loader, step, device, args, minmax, tag="test"):
 
 def train(args):
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    LR_VIT_WARMUP = 4e-6
-    LR_VIT = 4e-6
-    LR_OTHER = 4e-5
+    LR_VIT_WARMUP = 5e-6
+    LR_VIT = 5e-6
+    LR_OTHER = 5e-5
     MINMAX = (args.d_min, args.d_max)
 
     train_txt = args.train_txt
@@ -206,8 +277,8 @@ def train(args):
     bs = args.batch_size
     td = args.test_downsample
     tr = args.test_res
-    train_sets = [SimulatedDataset(txt, aspect_ratio=ar, random_crop=args.random_crop, target_size=ts, prompt_channels=pc) for txt in train_txt]
-    val_sets   = [SimulatedDataset(txt, aspect_ratio=ar, random_crop=args.random_crop, target_size=ts, prompt_channels=pc) for txt in val_txt]
+    train_sets = [SimulatedDataset(txt, aspect_ratio=ar, random_crop=args.random_crop, target_size=ts, prompt_channels=pc, confuse_lens_z=args.confuse_lens_z) for txt in train_txt]
+    val_sets   = [SimulatedDataset(txt, aspect_ratio=ar, random_crop=args.random_crop, target_size=ts, prompt_channels=pc, confuse_lens_z=args.confuse_lens_z) for txt in val_txt]
     test_sets =  [RealDataset(txt, downsample=td[i], aspect_ratio=ar, target_size=(tr[2*i], tr[2*i+1]), prompt_channels=pc) for i, txt in enumerate(args.test_txt)]
 
     train_loaders = [DataLoader(train_set, batch_size=bs, num_workers=min(os.cpu_count(), args.num_workers), shuffle=True) for train_set in train_sets]
@@ -247,7 +318,7 @@ def train(args):
     ])
     # No scheduling is used according to authors' reply
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10000, gamma=0.8)
-
+    
     wandb.init(project="PromptDA-Training", name=args.exp_name)
     wandb.config.update(vars(args))
 
@@ -282,7 +353,6 @@ def train(args):
                 {'params': vit_params,   'lr': LR_VIT},
                 {'params': other_params, 'lr': LR_OTHER}
             ])
-            # No scheduling is used according to authors' reply
             scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10000, gamma=0.8)
         if step == args.augment_start_steps:
             Log.info(f"Starting augmentation at step {step}.")
@@ -341,7 +411,7 @@ def train(args):
                 test(model, test_loader, step, DEVICE, args, MINMAX, tag=f"test_{i}")
 
         if step % args.save_every == 0:
-            ckpt_dir = os.path.join(args.ckpt_dir, f"{args.exp_name}-{args.backbone}")
+            ckpt_dir = os.path.join(args.ckpt_dir, f"{args.exp_name}")
             os.makedirs(ckpt_dir, exist_ok=True)
             ckpt_path = os.path.join(ckpt_dir, f"step_{step}.pth")
             torch.save({
@@ -351,6 +421,10 @@ def train(args):
                 'scheduler_state_dict': scheduler.state_dict(),
                 'args': vars(args),  # optional: saves hyperparams too
             }, ckpt_path)
+    for idx, test_loader in enumerate(test_loaders):
+        Log.info(f"Finalizing test for dataset {idx}...")
+        ckpt_dir = os.path.join(args.ckpt_dir, f"{args.exp_name}")
+        finalize(model, ckpt_dir, test_loader, f"{idx}", args)
 
 
 if __name__ == "__main__":
@@ -391,6 +465,7 @@ if __name__ == "__main__":
     parser.add_argument("--test-downsample", type=float, nargs='+', default=[1.0], help="Downsample factor for test images")
     parser.add_argument("--test-res", type=int, nargs='+', default=[], help= "Resolution for test images, if empty, uses original size")
     parser.add_argument("--num-workers", type=int, default=8, help="Number of workers for data loading")
+    parser.add_argument("--confuse-lens-z", type=str, nargs='+', default=['z180.0'], help="Weights for training text files")
 
     # Augmentation
     parser.add_argument("--augment-start-steps", type=int, default=1000000, help="Steps after which augmentation starts")
